@@ -5,7 +5,6 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import authenticate
 from rest_framework.permissions import IsAuthenticated
 from .serializers import RegisterRequest, LoginRequest
-from rest_framework.views import APIView
 from .models import *
 
 # Create your views here.
@@ -52,14 +51,12 @@ def me(request):
     }
     return Response(payload, 200)
 
-class VerfiyTokenView(APIView):
-    authentication_classes = [JWTAuthentication]
-    permisson_classes = [IsAuthenticated]
-
-    def get(self, request):
-        user = request.user
-        print("user", user)
-        return Response({
-            "id": user.id,
-            "email": user.email,
-        })
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def user_details(request):
+    user = request.user
+    return Response({
+        "id": user.id,
+        "email": user.email,
+    })

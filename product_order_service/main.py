@@ -27,17 +27,10 @@ def get_products(db: session = Depends(get_db), page: int = 1, limit: int = 10):
 
 @app.post("/cart/items", status_code=201)
 def cart_items(data: OrderIn, db: session = Depends(get_db), user=Depends(get_current_user)):
-
     qty_by_product = defaultdict(int)
     for item in data.items:
         qty_by_product[item.product_id] += item.quantity
-
-    cart = (
-        db.query(Orders)
-        .options(selectinload(Orders.items))
-        .filter(Orders.user_id == user["id"], Orders.status == "cart")
-        .first()
-    )
+    cart = (db.query(Orders).filter(Orders.user_id == user["id"], Orders.status == "cart").first())
     if not cart:
         cart = Orders(user_id=user["id"], status="cart", total_amount=Decimal("0"))
         db.add(cart)
@@ -67,13 +60,12 @@ def cart_items(data: OrderIn, db: session = Depends(get_db), user=Depends(get_cu
                 quantity=qty,
             ))
 
-    cart.total_amount = sum(
-        (i.unit_price * i.quantity for i in cart.items), Decimal("0")
-    )
+    cart.total_amount = sum((i.unit_price * i.quantity for i in cart.items), Decimal("0"))
 
     db.commit()
     db.refresh(cart)
     return {"message": "item added to cart", "order_id": cart.id, "total_amount": str(cart.total_amount)}
+    # return { "message": "item added" }
 
 @app.get("/orders/{id}")
 def order_items(id: int, db: session = Depends(get_db), user=Depends(get_current_user)):
@@ -173,11 +165,11 @@ def update_order_status(
     if not order:
         raise HTTPException(404, "Order not found")
     if order.status != "pending_payment":
-        return {"ok": True, "status": order.status}      # already handled
+        return {"ok": True, "status": order.status}
 
     order.status = data.status
     if data.status == "payment_failed":
-        for item in order.items:                          # give reserved stock back
+        for item in order.items:
             item.product.stock += item.quantity
     db.commit()
     return {"ok": True, "status": order.status}
