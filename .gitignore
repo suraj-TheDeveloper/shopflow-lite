@@ -19,3 +19,4 @@ bin-release/
 
 auth_user_env/
 product_order_env/
+payment_notification_env/

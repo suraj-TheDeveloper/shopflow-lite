@@ -6,6 +6,11 @@ from service import get_current_user
 from schemas import *
 from decimal import Decimal
 from sqlalchemy import select
+from collections import defaultdict
+from typing import Literal
+from kafka_producer import publish_event, producer
+import atexit
+atexit.register(lambda: producer.flush(5))
 
 Base.metadata.create_all(bind=engine)
 
@@ -22,26 +27,53 @@ def get_products(db: session = Depends(get_db), page: int = 1, limit: int = 10):
 
 @app.post("/cart/items", status_code=201)
 def cart_items(data: OrderIn, db: session = Depends(get_db), user=Depends(get_current_user)):
-    order = Orders(user_id=user["id"], total_amount=Decimal("0"))
-    total = Decimal("0")
 
+    qty_by_product = defaultdict(int)
     for item in data.items:
-        product = db.get(Product, item.product_id)
-        if not product:
-            raise HTTPException(404, f"Product {item.product_id} not found")
+        qty_by_product[item.product_id] += item.quantity
 
-        total += product.price * item.quantity
-        order.items.append(OrderItems(
-            product_id=product.id,
-            unit_price=product.price,
-            quantity=item.quantity,
-        ))
+    cart = (
+        db.query(Orders)
+        .options(selectinload(Orders.items))
+        .filter(Orders.user_id == user["id"], Orders.status == "cart")
+        .first()
+    )
+    if not cart:
+        cart = Orders(user_id=user["id"], status="cart", total_amount=Decimal("0"))
+        db.add(cart)
 
-    order.total_amount = total
-    db.add(order)
+    products = db.query(Product).filter(Product.id.in_(qty_by_product.keys())).all()
+    product_map = {p.id: p for p in products}
+
+    missing = set(qty_by_product) - set(product_map)
+    if missing:
+        raise HTTPException(404, f"Products not found: {sorted(missing)}")
+
+    existing = {i.product_id: i for i in cart.items}
+    for pid, qty in qty_by_product.items():
+        product = product_map[pid]
+        new_qty = qty + (existing[pid].quantity if pid in existing else 0)
+
+        if product.stock < new_qty:
+            raise HTTPException(409, f"Only {product.stock} of {product.name} in stock")
+
+        if pid in existing:
+            existing[pid].quantity = new_qty
+            existing[pid].unit_price = product.price
+        else:
+            cart.items.append(OrderItems(
+                product_id=pid,
+                unit_price=product.price,
+                quantity=qty,
+            ))
+
+    cart.total_amount = sum(
+        (i.unit_price * i.quantity for i in cart.items), Decimal("0")
+    )
+
     db.commit()
-    db.refresh(order)
-    return {"message": "item added to cart", "order_id": order.id}
+    db.refresh(cart)
+    return {"message": "item added to cart", "order_id": cart.id, "total_amount": str(cart.total_amount)}
 
 @app.get("/orders/{id}")
 def order_items(id: int, db: session = Depends(get_db), user=Depends(get_current_user)):
@@ -53,6 +85,7 @@ def order_items(id: int, db: session = Depends(get_db), user=Depends(get_current
             "order_id": orders.id,
             "user_id": orders.user_id,
             "total_amount": orders.total_amount,
+            "status": orders.status,
             "items": [
                 {
                     "id": item.id,
@@ -109,10 +142,42 @@ def checkout(order_id:int, db: session = Depends(get_db), user=Depends(get_curre
     order.total_amount = total
     order.status = "pending_payment"
     db.commit()
-
+    publish_event(
+        "order.created",
+        key=str(order.id),               # same order -> same partition -> ordered
+        data={"order_id": order.id, "user_id": order.user_id, "amount": str(total)},
+    )
     return {
         "message": "Checkout successful",
         "order_id": order.id,
         "status": order.status,
         "total_amount": str(total),
     }
+
+class StatusIn(BaseModel):
+    status: Literal["paid", "payment_failed"]
+
+@app.put("/internal/orders/{order_id}/status")
+def update_order_status(
+    order_id: int,
+    data: StatusIn,
+    db: session = Depends(get_db),
+):
+    order = (
+        db.query(Orders)
+        .options(selectinload(Orders.items).selectinload(OrderItems.product))
+        .filter(Orders.id == order_id)
+        .with_for_update()
+        .first()
+    )
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if order.status != "pending_payment":
+        return {"ok": True, "status": order.status}      # already handled
+
+    order.status = data.status
+    if data.status == "payment_failed":
+        for item in order.items:                          # give reserved stock back
+            item.product.stock += item.quantity
+    db.commit()
+    return {"ok": True, "status": order.status}
