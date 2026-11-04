@@ -16,7 +16,6 @@ Base.metadata.create_all(engine)
 
 app = FastAPI(title="Payment & Notification Service")
 
-
 # ---------- 1. Initiate a payment ----------
 @app.post("/payments/initiate", status_code=201, response_model=PaymentOut)
 def initiate_payment(
@@ -24,8 +23,6 @@ def initiate_payment(
     db: session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    # Ask the order service about the order (forward the user's token,
-    # so it only returns orders belonging to this user)
     try:
         resp = httpx.get(
             f"{ORDER_SERVICE_URL}/orders/{data.order_id}",
@@ -104,7 +101,6 @@ def payment_webhook(data: WebhookIn, db: session = Depends(get_db), x_webhook_se
             "transaction_id": data.transaction_id,
         },
     )
-    # db.add(Notification(user_id=payment.user_id, type=ntype, message=message))
     db.commit()
 
     # 2. Tell the order service (replaced by a Kafka event later)
